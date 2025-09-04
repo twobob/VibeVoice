@@ -147,10 +147,6 @@ def detect_speaker_segments(
     """Split raw text into speaker segments using a neuron's activation.
 
     This utility inspects the hidden activations from ``layer`` and ``dimension``
-    (by default layer 1, dim 609) of the language model to identify speaker
-    transitions. When the activation exceeds ``mean + threshold_scale * std`` a
-    new speaker segment is started.
-
     Returns a tuple of ``(scripts, speaker_numbers)`` formatted like
     ``parse_txt_script``.
     """
@@ -235,6 +231,11 @@ def parse_args():
         "--split_tracks",
         action="store_true",
         help="Generate separate audio tracks per speaker (default when --auto_detect)",
+    )
+    parser.add_argument(
+        "--auto_detect",
+        action="store_true",
+        help="Automatically detect speaker transitions using activation",
     )
     parser.add_argument(
         "--auto_detect",
