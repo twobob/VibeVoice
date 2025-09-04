@@ -250,6 +250,11 @@ def detect_speaker_segments(
             )
             scripts.append(f"{name}: {processed_text}")
             speaker_ids.append(name)
+
+            scripts.append(f"Speaker {speaker_id}: {processed_text}")
+            speaker_numbers.append(str(speaker_id))
+            speaker_id += 1
+
         else:
             logger.info("Discarding empty or invalid segment: %r", segment_text)
         start = idx
@@ -264,6 +269,8 @@ def detect_speaker_segments(
         )
         scripts.append(f"{name}: {processed_final}")
         speaker_ids.append(name)
+        scripts.append(f"Speaker {speaker_id}: {processed_final}")
+        speaker_numbers.append(str(speaker_id))
 
     return scripts, speaker_ids
 
