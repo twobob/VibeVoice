@@ -136,6 +136,60 @@ def parse_txt_script(txt_content: str) -> Tuple[List[str], List[str]]:
     return scripts, speaker_numbers
 
 
+def detect_speaker_segments(
+    txt_content: str,
+    model: VibeVoiceForConditionalGenerationInference,
+    tokenizer,
+    layer: int = 0,
+    dimension: int = 609,
+    threshold_scale: float = 2.0,
+) -> Tuple[List[str], List[str]]:
+    """Split raw text into speaker segments using a neuron's activation.
+
+    This utility inspects the hidden activations from ``layer`` and ``dimension``
+    of the language model to identify speaker transitions. When the activation
+    exceeds ``mean + threshold_scale * std`` a new speaker segment is started.
+
+    Returns a tuple of ``(scripts, speaker_numbers)`` formatted like
+    ``parse_txt_script``.
+    """
+
+    encoded = tokenizer(txt_content, return_tensors="pt")
+    input_ids = encoded["input_ids"].to(model.device)
+
+    with torch.no_grad():
+        outputs = model.model.language_model(
+            input_ids=input_ids,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+
+    hidden = outputs.hidden_states[layer + 1][0, :, dimension].cpu()
+    threshold = hidden.mean() + threshold_scale * hidden.std()
+    transitions = (hidden > threshold).nonzero(as_tuple=True)[0].tolist()
+
+    tokens = input_ids[0].cpu().tolist()
+    scripts, speaker_numbers = [], []
+    start = 0
+    speaker_id = 1  # 1-based indexing for compatibility with existing code
+
+    for idx in transitions:
+        segment_tokens = tokens[start:idx]
+        segment_text = tokenizer.decode(segment_tokens, skip_special_tokens=True).strip()
+        if segment_text:
+            scripts.append(f"Speaker {speaker_id}: {segment_text}")
+            speaker_numbers.append(str(speaker_id))
+            speaker_id += 1
+        start = idx
+
+    final_text = tokenizer.decode(tokens[start:], skip_special_tokens=True).strip()
+    if final_text:
+        scripts.append(f"Speaker {speaker_id}: {final_text}")
+        speaker_numbers.append(str(speaker_id))
+
+    return scripts, speaker_numbers
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="VibeVoice Processor TXT Input Test")
     parser.add_argument(
@@ -181,6 +235,11 @@ def parse_args():
         action="store_true",
         help="Generate separate audio tracks per speaker",
     )
+    parser.add_argument(
+        "--auto_detect",
+        action="store_true",
+        help="Automatically detect speaker transitions using activation",
+    )
 
     return parser.parse_args()
 
@@ -207,63 +266,13 @@ def main():
         print(f"Error: txt file not found: {args.txt_path}")
         return
     
-    # Read and parse txt file
+    # Read txt file
     print(f"Reading script from: {args.txt_path}")
     with open(args.txt_path, 'r', encoding='utf-8') as f:
         txt_content = f.read()
-    
-    # Parse the txt content to get speaker numbers
-    scripts, speaker_numbers = parse_txt_script(txt_content)
-    
-    if not scripts:
-        print("Error: No valid speaker scripts found in the txt file")
-        return
-    
-    print(f"Found {len(scripts)} speaker segments:")
-    for i, (script, speaker_num) in enumerate(zip(scripts, speaker_numbers)):
-        print(f"  {i+1}. Speaker {speaker_num}")
-        print(f"     Text preview: {script[:100]}...")
-    
-    # Map speaker numbers to provided speaker names
-    speaker_name_mapping = {}
-    speaker_names_list = args.speaker_names if isinstance(args.speaker_names, list) else [args.speaker_names]
-    for i, name in enumerate(speaker_names_list, 1):
-        speaker_name_mapping[str(i)] = name
-    
-    print(f"\nSpeaker mapping:")
-    for speaker_num in set(speaker_numbers):
-        mapped_name = speaker_name_mapping.get(speaker_num, f"Speaker {speaker_num}")
-        print(f"  Speaker {speaker_num} -> {mapped_name}")
-    
-    # Map speakers to voice files using the provided speaker names
-    voice_samples = []
-    actual_speakers = []
-    speaker_voice_map: Dict[str, str] = {}
 
-    # Get unique speaker numbers in order of first appearance
-    unique_speaker_numbers = []
-    seen = set()
-    for speaker_num in speaker_numbers:
-        if speaker_num not in seen:
-            unique_speaker_numbers.append(speaker_num)
-            seen.add(speaker_num)
-    
-    for speaker_num in unique_speaker_numbers:
-        speaker_name = speaker_name_mapping.get(speaker_num, f"Speaker {speaker_num}")
-        voice_path = voice_mapper.get_voice_path(speaker_name)
-        voice_samples.append(voice_path)
-        actual_speakers.append(speaker_name)
-        speaker_voice_map[speaker_num] = voice_path
-        print(f"Speaker {speaker_num} ('{speaker_name}') -> Voice: {os.path.basename(voice_path)}")
-    
-    # Prepare data for model
-    full_script = '\n'.join(scripts)
-    full_script = full_script.replace("’", "'")        
-    
     print(f"Loading processor & model from {args.model_path}")
     processor = VibeVoiceProcessor.from_pretrained(args.model_path)
-
-
     # Decide dtype & attention implementation
     if args.device == "mps":
         load_dtype = torch.float32  # MPS requires float32
@@ -318,6 +327,55 @@ def main():
 
     model.eval()
     model.set_ddpm_inference_steps(num_steps=10)
+
+    # Determine segments either via auto detection or pre-labelled script
+    if args.auto_detect:
+        print("Detecting speaker transitions from activation...")
+        scripts, speaker_numbers = detect_speaker_segments(txt_content, model, processor.tokenizer)
+    else:
+        scripts, speaker_numbers = parse_txt_script(txt_content)
+
+    if not scripts:
+        print("Error: No valid speaker scripts found in the txt file")
+        return
+
+    print(f"Found {len(scripts)} speaker segments:")
+    for i, (script, speaker_num) in enumerate(zip(scripts, speaker_numbers)):
+        print(f"  {i+1}. Speaker {speaker_num}")
+        print(f"     Text preview: {script[:100]}...")
+
+    # Map speaker numbers to provided speaker names
+    speaker_name_mapping = {}
+    speaker_names_list = args.speaker_names if isinstance(args.speaker_names, list) else [args.speaker_names]
+    for i, name in enumerate(speaker_names_list, 1):
+        speaker_name_mapping[str(i)] = name
+
+    print(f"\nSpeaker mapping:")
+    for speaker_num in set(speaker_numbers):
+        mapped_name = speaker_name_mapping.get(speaker_num, f"Speaker {speaker_num}")
+        print(f"  Speaker {speaker_num} -> {mapped_name}")
+
+    # Map speakers to voice files using the provided speaker names
+    voice_samples = []
+    actual_speakers = []
+    speaker_voice_map: Dict[str, str] = {}
+    unique_speaker_numbers = []
+    seen = set()
+    for speaker_num in speaker_numbers:
+        if speaker_num not in seen:
+            unique_speaker_numbers.append(speaker_num)
+            seen.add(speaker_num)
+
+    for speaker_num in unique_speaker_numbers:
+        speaker_name = speaker_name_mapping.get(speaker_num, f"Speaker {speaker_num}")
+        voice_path = voice_mapper.get_voice_path(speaker_name)
+        voice_samples.append(voice_path)
+        actual_speakers.append(speaker_name)
+        speaker_voice_map[speaker_num] = voice_path
+        print(f"Speaker {speaker_num} ('{speaker_name}') -> Voice: {os.path.basename(voice_path)}")
+
+    full_script = '\n'.join(scripts)
+    full_script = full_script.replace("’", "'")
 
     if hasattr(model.model, 'language_model'):
        print(f"Language model attention: {model.model.language_model.config._attn_implementation}")
