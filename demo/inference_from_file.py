@@ -190,6 +190,21 @@ def detect_speaker_segments(
     else:
         logger.info("No transitions exceeded the threshold")
 
+    logger.info(
+        "Activation threshold %.4f (mean %.4f + %.2f * std %.4f)",
+        threshold,
+        hidden.mean(),
+        threshold_scale,
+        hidden.std(),
+    )
+    if transitions:
+        for idx in transitions:
+            logger.info(
+                "Transition at token %d with activation %.4f", idx, hidden[idx]
+            )
+    else:
+        logger.info("No transitions exceeded the threshold")
+
     tokens = input_ids[0].cpu().tolist()
     scripts, speaker_numbers = [], []
     start = 0
@@ -281,6 +296,7 @@ def parse_args():
         default=2.0,
         help="Scale factor applied to std when computing activation threshold",
     )
+
     parser.add_argument(
         "--activation_min_gap_tokens",
         type=int,
@@ -388,6 +404,7 @@ def main():
             layer=args.activation_layer,
             dimension=args.activation_dimension,
             threshold_scale=args.activation_threshold_scale,
+
             min_gap_tokens=args.activation_min_gap_tokens,
         )
     else:
