@@ -2,7 +2,7 @@ import argparse
 import os
 import re
 import traceback
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 import time
 import torch
 
@@ -91,49 +91,54 @@ class VoiceMapper:
 
 
 def parse_txt_script(txt_content: str) -> Tuple[List[str], List[str]]:
+    """Parse a transcript into per-speaker segments.
+
+    Each line starting with ``<name>:`` begins a new speaker turn where
+    ``<name>`` can be either ``Speaker 1`` style identifiers or arbitrary
+    names (e.g., ``Alice``). Lines that do not contain a colon are treated as
+    continuations of the current speaker's text.
+
+    Returns a tuple ``(scripts, speaker_names)`` where ``scripts`` are the full
+    lines in ``"Name: content"`` format and ``speaker_names`` are the extracted
+    speaker names in order.
     """
-    Parse txt script content and extract speakers and their text
-    Fixed pattern: Speaker 1, Speaker 2, Speaker 3, Speaker 4
-    Returns: (scripts, speaker_numbers)
-    """
-    lines = txt_content.strip().split('\n')
-    scripts = []
-    speaker_numbers = []
-    
-    # Pattern to match "Speaker X:" format where X is a number
-    speaker_pattern = r'^Speaker\s+(\d+):\s*(.*)$'
-    
-    current_speaker = None
+
+    lines = txt_content.strip().split("\n")
+    scripts: List[str] = []
+    speaker_names: List[str] = []
+
+    # Match anything up to the first colon as the speaker name
+    speaker_pattern = r"^([^:]+):\s*(.*)$"
+
+    current_name: Optional[str] = None
     current_text = ""
-    
+
     for line in lines:
         line = line.strip()
         if not line:
             continue
-            
-        match = re.match(speaker_pattern, line, re.IGNORECASE)
-        if match:
-            # If we have accumulated text from previous speaker, save it
-            if current_speaker and current_text:
-                scripts.append(f"Speaker {current_speaker}: {current_text.strip()}")
-                speaker_numbers.append(current_speaker)
-            
-            # Start new speaker
-            current_speaker = match.group(1).strip()
+
+        match = re.match(speaker_pattern, line)
+        if match and re.search(r"[A-Za-z]", match.group(1)):
+            # Save previous speaker turn
+            if current_name and current_text:
+                scripts.append(f"{current_name}: {current_text.strip()}")
+                speaker_names.append(current_name)
+
+            current_name = match.group(1).strip()
             current_text = match.group(2).strip()
         else:
-            # Continue text for current speaker
+            # Continuation of current speaker
             if current_text:
                 current_text += " " + line
             else:
                 current_text = line
-    
-    # Don't forget the last speaker
-    if current_speaker and current_text:
-        scripts.append(f"Speaker {current_speaker}: {current_text.strip()}")
-        speaker_numbers.append(current_speaker)
-    
-    return scripts, speaker_numbers
+
+    if current_name and current_text:
+        scripts.append(f"{current_name}: {current_text.strip()}")
+        speaker_names.append(current_name)
+
+    return scripts, speaker_names
 
 
 def detect_speaker_segments(
@@ -144,6 +149,7 @@ def detect_speaker_segments(
     dimension: int = 609,
     threshold_scale: float = 2.0,
     min_gap_tokens: int = 20,
+    speaker_names: Optional[List[str]] = None,
 ) -> Tuple[List[str], List[str]]:
     """Split raw text into speaker segments using a neuron's activation.
 
@@ -205,26 +211,61 @@ def detect_speaker_segments(
     else:
         logger.info("No transitions exceeded the threshold")
 
-    tokens = input_ids[0].cpu().tolist()
-    scripts, speaker_numbers = [], []
-    start = 0
-    speaker_id = 1  # 1-based indexing for compatibility with existing code
+    def _process_segment_text(text: str) -> Optional[str]:
+        """Clean up decoded text and discard non-content segments.
 
-    for idx in transitions:
+        Removes leading numbering (e.g., "Speaker 1:" or "1:") and returns
+        ``None`` if no English content remains. This helps avoid spurious
+        segments such as a lone "Speaker" token at the beginning of the text.
+        """
+
+        cleaned = text.strip()
+        if not cleaned:
+            return None
+        # Drop leading patterns like "Speaker 1:" or "1:" that may appear
+        cleaned = re.sub(r"^(?:[Ss]peaker\s*\d+:?|\d+:?)\s*", "", cleaned).strip()
+        if not cleaned:
+            return None
+        # Discard if the remaining text is still just a speaker tag
+        if re.fullmatch(r"[Ss]peaker\s*\d*", cleaned):
+            return None
+        # Ensure there is at least one alphabetic character
+        if not re.search(r"[A-Za-z]", cleaned):
+            return None
+        return cleaned
+
+    tokens = input_ids[0].cpu().tolist()
+    scripts, speaker_ids = [], []
+    start = 0
+
+    for seg_idx, idx in enumerate(transitions):
         segment_tokens = tokens[start:idx]
-        segment_text = tokenizer.decode(segment_tokens, skip_special_tokens=True).strip()
-        if segment_text:
-            scripts.append(f"Speaker {speaker_id}: {segment_text}")
-            speaker_numbers.append(str(speaker_id))
-            speaker_id += 1
+        segment_text = tokenizer.decode(segment_tokens, skip_special_tokens=True)
+        processed_text = _process_segment_text(segment_text)
+        if processed_text:
+            name = (
+                speaker_names[seg_idx]
+                if speaker_names and seg_idx < len(speaker_names)
+                else f"Speaker {seg_idx+1}"
+            )
+            scripts.append(f"{name}: {processed_text}")
+            speaker_ids.append(name)
+        else:
+            logger.info("Discarding empty or invalid segment: %r", segment_text)
         start = idx
 
-    final_text = tokenizer.decode(tokens[start:], skip_special_tokens=True).strip()
-    if final_text:
-        scripts.append(f"Speaker {speaker_id}: {final_text}")
-        speaker_numbers.append(str(speaker_id))
+    final_text = tokenizer.decode(tokens[start:], skip_special_tokens=True)
+    processed_final = _process_segment_text(final_text)
+    if processed_final:
+        name = (
+            speaker_names[len(scripts)]
+            if speaker_names and len(scripts) < len(speaker_names)
+            else f"Speaker {len(scripts)+1}"
+        )
+        scripts.append(f"{name}: {processed_final}")
+        speaker_ids.append(name)
 
-    return scripts, speaker_numbers
+    return scripts, speaker_ids
 
 
 def parse_args():
@@ -397,16 +438,30 @@ def main():
     # Determine segments either via auto detection or pre-labelled script
     if args.auto_detect:
         print("Detecting speaker transitions from activation...")
+        parsed_scripts, parsed_names = parse_txt_script(txt_content)
+        if parsed_scripts:
+            content_for_detection = "\n".join(
+                re.sub(r"^([^:]+):\s*", "", s) for s in parsed_scripts
+            )
+        else:
+            content_for_detection = txt_content
+
         scripts, speaker_numbers = detect_speaker_segments(
-            txt_content,
+            content_for_detection,
             model,
             processor.tokenizer,
             layer=args.activation_layer,
             dimension=args.activation_dimension,
             threshold_scale=args.activation_threshold_scale,
-
             min_gap_tokens=args.activation_min_gap_tokens,
+            speaker_names=parsed_names if parsed_scripts else None,
         )
+
+        if parsed_names and len(scripts) != len(parsed_names):
+            print(
+                "Warning: detected segments do not align with provided speakers; using scripted transitions"
+            )
+            scripts, speaker_numbers = parsed_scripts, parsed_names
     else:
         scripts, speaker_numbers = parse_txt_script(txt_content)
 
@@ -416,21 +471,24 @@ def main():
 
     print(f"Found {len(scripts)} speaker segments:")
     for i, (script, speaker_num) in enumerate(zip(scripts, speaker_numbers)):
-        print(f"  {i+1}. Speaker {speaker_num}")
+        print(f"  {i+1}. {speaker_num}")
         print(f"     Text preview: {script[:100]}...")
 
-    # Map speaker numbers to provided speaker names
-    speaker_name_mapping = {}
-    speaker_names_list = args.speaker_names if isinstance(args.speaker_names, list) else [args.speaker_names]
+    # Map speaker identifiers to provided speaker names
+    speaker_name_mapping: Dict[str, str] = {}
+    speaker_names_list = (
+        args.speaker_names if isinstance(args.speaker_names, list) else [args.speaker_names]
+    )
     for i, name in enumerate(speaker_names_list, 1):
         speaker_name_mapping[str(i)] = name
+        speaker_name_mapping[f"Speaker {i}"] = name
 
     print(f"\nSpeaker mapping:")
     for speaker_num in set(speaker_numbers):
-        mapped_name = speaker_name_mapping.get(speaker_num, f"Speaker {speaker_num}")
-        print(f"  Speaker {speaker_num} -> {mapped_name}")
+        mapped_name = speaker_name_mapping.get(speaker_num, speaker_num)
+        print(f"  {speaker_num} -> {mapped_name}")
 
-    # Map speakers to voice files using the provided speaker names
+    # Map speakers to voice files using the resolved speaker names
     voice_samples = []
     actual_speakers = []
     speaker_voice_map: Dict[str, str] = {}
@@ -442,12 +500,12 @@ def main():
             seen.add(speaker_num)
 
     for speaker_num in unique_speaker_numbers:
-        speaker_name = speaker_name_mapping.get(speaker_num, f"Speaker {speaker_num}")
+        speaker_name = speaker_name_mapping.get(speaker_num, speaker_num)
         voice_path = voice_mapper.get_voice_path(speaker_name)
         voice_samples.append(voice_path)
         actual_speakers.append(speaker_name)
         speaker_voice_map[speaker_num] = voice_path
-        print(f"Speaker {speaker_num} ('{speaker_name}') -> Voice: {os.path.basename(voice_path)}")
+        print(f"{speaker_num} ('{speaker_name}') -> Voice: {os.path.basename(voice_path)}")
 
     full_script = '\n'.join(scripts)
     full_script = full_script.replace("’", "'")
@@ -463,7 +521,7 @@ def main():
         segment_data = []
 
         for script, speaker_num in zip(scripts, speaker_numbers):
-            speaker_name = speaker_name_mapping.get(speaker_num, f"Speaker {speaker_num}")
+            speaker_name = speaker_name_mapping.get(speaker_num, speaker_num)
             voice_path = speaker_voice_map[speaker_num]
             seg_inputs = processor(
                 text=[script],
@@ -476,7 +534,7 @@ def main():
                 if torch.is_tensor(v):
                     seg_inputs[k] = v.to(target_device)
 
-            print(f"Generating audio for Speaker {speaker_num} ('{speaker_name}')")
+            print(f"Generating audio for {speaker_num} ('{speaker_name}')")
             seg_outputs = model.generate(
                 **seg_inputs,
                 max_new_tokens=None,
@@ -494,14 +552,18 @@ def main():
                 'samples': seg_waveform.shape[-1],
             })
 
-        # Build per-speaker tracks by concatenating their segments
+        # Build aligned per-speaker tracks, inserting silence when others speak
         tracks: Dict[str, List[torch.Tensor]] = {sn: [] for sn in unique_speaker_numbers}
         for seg in segment_data:
-            tracks[seg['speaker_num']].append(seg['waveform'])
+            for sn in unique_speaker_numbers:
+                if sn == seg['speaker_num']:
+                    tracks[sn].append(seg['waveform'])
+                else:
+                    tracks[sn].append(torch.zeros(seg['samples'], dtype=seg['waveform'].dtype))
 
         os.makedirs(args.output_dir, exist_ok=True)
         for sn, pieces in tracks.items():
-            speaker_name = speaker_name_mapping.get(sn, f"Speaker {sn}")
+            speaker_name = speaker_name_mapping.get(sn, sn)
             sanitized_name = re.sub(r"\W+", "_", speaker_name)
             track = torch.cat(pieces, dim=-1) if pieces else torch.zeros(0, dtype=segment_data[0]['waveform'].dtype)
             output_path = os.path.join(args.output_dir, f"{sanitized_name}.wav")
