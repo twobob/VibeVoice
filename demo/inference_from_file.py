@@ -2,7 +2,7 @@ import argparse
 import os
 import re
 import traceback
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 import time
 import torch
 
@@ -205,6 +205,29 @@ def detect_speaker_segments(
     else:
         logger.info("No transitions exceeded the threshold")
 
+    def _process_segment_text(text: str) -> Optional[str]:
+        """Clean up decoded text and discard non-content segments.
+
+        Removes leading numbering (e.g., "Speaker 1:" or "1:") and returns
+        ``None`` if no English content remains. This helps avoid spurious
+        segments such as a lone "Speaker" token at the beginning of the text.
+        """
+
+        cleaned = text.strip()
+        if not cleaned:
+            return None
+        # Drop leading patterns like "Speaker 1:" or "1:" that may appear
+        cleaned = re.sub(r"^(?:[Ss]peaker\s*\d+:?|\d+:?)\s*", "", cleaned).strip()
+        if not cleaned:
+            return None
+        # Discard if the remaining text is still just a speaker tag
+        if re.fullmatch(r"[Ss]peaker\s*\d*", cleaned):
+            return None
+        # Ensure there is at least one alphabetic character
+        if not re.search(r"[A-Za-z]", cleaned):
+            return None
+        return cleaned
+
     tokens = input_ids[0].cpu().tolist()
     scripts, speaker_numbers = [], []
     start = 0
@@ -212,16 +235,20 @@ def detect_speaker_segments(
 
     for idx in transitions:
         segment_tokens = tokens[start:idx]
-        segment_text = tokenizer.decode(segment_tokens, skip_special_tokens=True).strip()
-        if segment_text:
-            scripts.append(f"Speaker {speaker_id}: {segment_text}")
+        segment_text = tokenizer.decode(segment_tokens, skip_special_tokens=True)
+        processed_text = _process_segment_text(segment_text)
+        if processed_text:
+            scripts.append(f"Speaker {speaker_id}: {processed_text}")
             speaker_numbers.append(str(speaker_id))
             speaker_id += 1
+        else:
+            logger.info("Discarding empty or invalid segment: %r", segment_text)
         start = idx
 
-    final_text = tokenizer.decode(tokens[start:], skip_special_tokens=True).strip()
-    if final_text:
-        scripts.append(f"Speaker {speaker_id}: {final_text}")
+    final_text = tokenizer.decode(tokens[start:], skip_special_tokens=True)
+    processed_final = _process_segment_text(final_text)
+    if processed_final:
+        scripts.append(f"Speaker {speaker_id}: {processed_final}")
         speaker_numbers.append(str(speaker_id))
 
     return scripts, speaker_numbers
@@ -494,10 +521,14 @@ def main():
                 'samples': seg_waveform.shape[-1],
             })
 
-        # Build per-speaker tracks by concatenating their segments
+        # Build aligned per-speaker tracks, inserting silence when others speak
         tracks: Dict[str, List[torch.Tensor]] = {sn: [] for sn in unique_speaker_numbers}
         for seg in segment_data:
-            tracks[seg['speaker_num']].append(seg['waveform'])
+            for sn in unique_speaker_numbers:
+                if sn == seg['speaker_num']:
+                    tracks[sn].append(seg['waveform'])
+                else:
+                    tracks[sn].append(torch.zeros(seg['samples'], dtype=seg['waveform'].dtype))
 
         os.makedirs(args.output_dir, exist_ok=True)
         for sn, pieces in tracks.items():
