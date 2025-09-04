@@ -143,12 +143,14 @@ def detect_speaker_segments(
     layer: int = 0,
     dimension: int = 609,
     threshold_scale: float = 2.0,
+    min_gap_tokens: int = 20,
 ) -> Tuple[List[str], List[str]]:
     """Split raw text into speaker segments using a neuron's activation.
 
     This utility inspects the hidden activations from ``layer`` and ``dimension``
     Returns a tuple of ``(scripts, speaker_numbers)`` formatted like
-    ``parse_txt_script``.
+    ``parse_txt_script``. ``min_gap_tokens`` guards against rapid successive
+    crossings that would otherwise create many small segments.
     """
 
     encoded = tokenizer(txt_content, return_tensors="pt")
@@ -163,7 +165,30 @@ def detect_speaker_segments(
 
     hidden = outputs.hidden_states[layer + 1][0, :, dimension].cpu()
     threshold = hidden.mean() + threshold_scale * hidden.std()
-    transitions = (hidden > threshold).nonzero(as_tuple=True)[0].tolist()
+    above = hidden > threshold
+    crossing_indices = ((~above[:-1]) & above[1:]).nonzero(as_tuple=True)[0] + 1
+
+    transitions: List[int] = []
+    last_idx = -min_gap_tokens
+    for idx in crossing_indices.tolist():
+        if idx - last_idx >= min_gap_tokens:
+            transitions.append(idx)
+            last_idx = idx
+
+    logger.info(
+        "Activation threshold %.4f (mean %.4f + %.2f * std %.4f)",
+        threshold,
+        hidden.mean(),
+        threshold_scale,
+        hidden.std(),
+    )
+    if transitions:
+        for idx in transitions:
+            logger.info(
+                "Transition at token %d with activation %.4f", idx, hidden[idx]
+            )
+    else:
+        logger.info("No transitions exceeded the threshold")
 
     logger.info(
         "Activation threshold %.4f (mean %.4f + %.2f * std %.4f)",
@@ -272,6 +297,13 @@ def parse_args():
         help="Scale factor applied to std when computing activation threshold",
     )
 
+    parser.add_argument(
+        "--activation_min_gap_tokens",
+        type=int,
+        default=20,
+        help="Minimum tokens between detected transitions to avoid spurious splits",
+    )
+
     return parser.parse_args()
 
 def main():
@@ -372,6 +404,8 @@ def main():
             layer=args.activation_layer,
             dimension=args.activation_dimension,
             threshold_scale=args.activation_threshold_scale,
+
+            min_gap_tokens=args.activation_min_gap_tokens,
         )
     else:
         scripts, speaker_numbers = parse_txt_script(txt_content)
