@@ -140,16 +140,13 @@ def detect_speaker_segments(
     txt_content: str,
     model: VibeVoiceForConditionalGenerationInference,
     tokenizer,
-    layer: int = 0,
+    layer: int = 1,
     dimension: int = 609,
     threshold_scale: float = 2.0,
 ) -> Tuple[List[str], List[str]]:
     """Split raw text into speaker segments using a neuron's activation.
 
     This utility inspects the hidden activations from ``layer`` and ``dimension``
-    of the language model to identify speaker transitions. When the activation
-    exceeds ``mean + threshold_scale * std`` a new speaker segment is started.
-
     Returns a tuple of ``(scripts, speaker_numbers)`` formatted like
     ``parse_txt_script``.
     """
@@ -233,7 +230,12 @@ def parse_args():
     parser.add_argument(
         "--split_tracks",
         action="store_true",
-        help="Generate separate audio tracks per speaker",
+        help="Generate separate audio tracks per speaker (default when --auto_detect)",
+    )
+    parser.add_argument(
+        "--auto_detect",
+        action="store_true",
+        help="Automatically detect speaker transitions using activation",
     )
     parser.add_argument(
         "--auto_detect",
@@ -245,6 +247,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    if args.auto_detect and not args.split_tracks:
+        args.split_tracks = True
 
     # Normalize potential 'mpx' typo to 'mps'
     if args.device.lower() == "mpx":
@@ -419,29 +424,19 @@ def main():
                 'samples': seg_waveform.shape[-1],
             })
 
-        # Build per-speaker tracks inserting silence for others
-        tracks: Dict[str, torch.Tensor] = {
-            sn: torch.zeros(0, dtype=segment_data[0]['waveform'].dtype) for sn in unique_speaker_numbers
-        }
+        # Build per-speaker tracks by concatenating their segments
+        tracks: Dict[str, List[torch.Tensor]] = {sn: [] for sn in unique_speaker_numbers}
         for seg in segment_data:
-            seg_wave = seg['waveform']
-            seg_samples = seg['samples']
-            for sn in unique_speaker_numbers:
-                if sn == seg['speaker_num']:
-                    tracks[sn] = torch.cat([tracks[sn], seg_wave], dim=-1)
-                else:
-                    tracks[sn] = torch.cat([
-                        tracks[sn],
-                        torch.zeros(seg_samples, dtype=seg_wave.dtype)
-                    ], dim=-1)
+            tracks[seg['speaker_num']].append(seg['waveform'])
 
         os.makedirs(args.output_dir, exist_ok=True)
-        for sn, track in tracks.items():
+        for sn, pieces in tracks.items():
             speaker_name = speaker_name_mapping.get(sn, f"Speaker {sn}")
             sanitized_name = re.sub(r"\W+", "_", speaker_name)
-            output_path = os.path.join(args.output_dir, f"{sanitized_name}_track.wav")
+            track = torch.cat(pieces, dim=-1) if pieces else torch.zeros(0, dtype=segment_data[0]['waveform'].dtype)
+            output_path = os.path.join(args.output_dir, f"{sanitized_name}.wav")
             processor.save_audio(track, output_path=output_path)
-            print(f"Saved track for {speaker_name} to {output_path}")
+            print(f"Saved audio for {speaker_name} to {output_path}")
 
         print("\n" + "="*50)
         print("GENERATION SUMMARY")
