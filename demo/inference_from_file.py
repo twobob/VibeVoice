@@ -237,11 +237,6 @@ def parse_args():
         action="store_true",
         help="Automatically detect speaker transitions using activation",
     )
-    parser.add_argument(
-        "--auto_detect",
-        action="store_true",
-        help="Automatically detect speaker transitions using activation",
-    )
 
     return parser.parse_args()
 
