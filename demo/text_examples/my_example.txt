@@ -1,0 +1,7 @@
+Speaker 0: Here is an example text getting rendered from the file  my_example dot txt in the demos, text_examples subfolder of the VibeVoice repository on github.
+
+Speaker 1: So, I can just edit that file or replace it with one of my own?
+
+Speaker 0: Exactly! Yes, to generate your own text file based example this would be a great place to start. On the Kaggle website it can now be found in the OUTPUT section of the UI on the right hand side, simply open the UI to see the file. Remember editing a file in ipython requires you to use the percent character and the load command like %load /kaggle/working/VibeVoice/demo/text_examples/my_example.txt - this shows the files contents underneath the magic command.
+
+Speaker 0: To save the edited file replace the load command text on the first line with the following magic command: %%writefile /kaggle/working/VibeVoice/demo/text_examples/my_example.txt , which creates or overwrites the file at the path provided with the contents underneath the magic command. Happy kaggleing!
