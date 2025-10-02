@@ -35,6 +35,7 @@ The model can synthesize speech up to **90 minutes** long with up to **4 distinc
 
 - **[2025-08-26] 🎉 We Open Source the [VibeVoice-Large](https://huggingface.co/PsiPi/VibeVoice-Large-pt) model weights!**
 - **[2025-08-28] 🎉 We provide a [Kaggle](https://www.kaggle.com/code/twobob/vibevoice-inference) script for easy access to our model. Due to GPU memory limitations, only VibeVoice-1.5B is supported.**
+- **[2025-10-02] 🎉 Unofficial LORA based finetuning repo is now available on [Github](https://github.com/voicepowered-ai/VibeVoice-finetuning) thanks to @jpgallegoar-vpai
 
 ### 📋 TODO
 
