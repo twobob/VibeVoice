@@ -1,0 +1,7 @@
+Speaker 1: Here is an example textfile, getting rendered to the file: my underscore example underscore inline dot txt in the included `demos`. This and other examples are in the `text examples` subfolder of the VibeVoice repository on github.
+
+Speaker 2: So, I can just edit that file or replace it with one of my own?
+
+Speaker 1: Exactly! Yes, to generate your own text file based example this would be a great place to start. On the Kaggle website it can now be found in the OUTPUT section of the UI on the right hand side, simply open the UI to see the file. Remember editing a file in ipython requires you to use the percent character and the load command like %load and then the path to your file. This `load` command shows the files contents immediately underneath where the the magic command was entered.
+
+Speaker 1: To save the edited file replace the load command text on the first line with the following magic command which requires you to use the percent character twice and the writefile command like so:   %%writefile , which creates or overwrites the file at the path provided with the contents underneath the magic command. Happy kaggleing!
